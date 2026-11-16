@@ -1,6 +1,6 @@
 name: Release
 
-# Run by hand from the Actions tab. Publishes a pre-release named after the
+# Run by hand from the Actions tab. Publishes a release named after the
 # version in manifest.json, so bump that version before each run.
 on:
   workflow_dispatch:
@@ -34,6 +34,5 @@ jobs:
           gh release create "v${VERSION}" "${ZIP}" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
-            --prerelease \
             --title "v${VERSION}" \
             --notes "Install: download the zip, unzip it, open chrome://extensions, turn on Developer mode, click Load unpacked and pick the unzipped folder."
