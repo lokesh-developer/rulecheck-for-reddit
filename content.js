@@ -9,7 +9,6 @@
   let panel = null, badge = null, ui = null;
   let autoOn = false, timer = null, inFlight = false, pending = false;
   let lastKey = '', lastRun = 0, undo = null;
-  let found = { title: null, body: null, url: null };
 
   // Checking while typing costs a provider call per pause, so it is opt-in from the settings page.
   chrome.storage.local.get({ autoCheck: false }).then((s) => { autoOn = s.autoCheck; });
@@ -24,28 +23,36 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // New Reddit builds its composer out of web components, so plain querySelector misses it.
-  function deepQuery(selector, root = document) {
-    const hit = root.querySelector(selector);
-    if (hit && !hit.closest?.('.wae-rc')) return hit;
-    for (const el of root.querySelectorAll('*')) {
-      if (el.shadowRoot) {
-        const inner = deepQuery(selector, el.shadowRoot);
-        if (inner) return inner;
-      }
-    }
-    return null;
+  function deepAll(selector, root = document, out = []) {
+    for (const e of root.querySelectorAll(selector)) if (!e.closest('.wae-rc')) out.push(e);
+    for (const e of root.querySelectorAll('*')) if (e.shadowRoot) deepAll(selector, e.shadowRoot, out);
+    return out;
   }
-  const firstOf = (...sels) => { for (const s of sels) { const e = deepQuery(s); if (e) return e; } return null; };
 
-  // Walking every shadow root is slow, so keep the elements until Reddit replaces them.
-  function fields() {
-    if (!found.title?.isConnected) found.title = firstOf('textarea[name="title"]', 'input[name="title"]');
-    if (!found.body?.isConnected) {
-      found.body = firstOf('textarea[name="text"]', 'textarea[name="body"]',
-        '[contenteditable="true"][role="textbox"]', '[contenteditable="true"]');
+  // Walking every shadow root is slow, so the list of editable elements is reused for a moment.
+  let scan = { at: 0, els: [] };
+  function editables() {
+    if (Date.now() - scan.at > 2000 || scan.els.some((e) => !e.isConnected)) {
+      scan = { at: Date.now(), els: deepAll('textarea, input[name="title"], input[name="url"], [contenteditable]:not([contenteditable="false"])') };
     }
-    if (!found.url?.isConnected) found.url = firstOf('textarea[name="link"]', 'input[name="url"]', 'textarea[name="url"]');
-    return found;
+    return scan.els;
+  }
+  // The field's name is sometimes on the element and sometimes on the web component wrapping it.
+  const nameOf = (e) => e.getAttribute('name') || e.getRootNode().host?.getAttribute?.('name') || '';
+  const isVisible = (e) => { const r = e.getBoundingClientRect(); return r.width > 20 && r.height > 8; };
+
+  // Reddit keeps several candidate body fields on the page at once (the rich editor, a markdown
+  // textarea, hidden form mirrors), and which one holds the text depends on the editor mode.
+  // So the body is whichever editable currently holds the most text, not the first match.
+  function fields() {
+    const els = editables();
+    const title = els.find((e) => nameOf(e) === 'title') || null;
+    const url = els.find((e) => ['link', 'url'].includes(nameOf(e))) || null;
+    const rest = els.filter((e) => e !== title && e !== url
+      && !els.some((o) => o !== e && o !== title && o.contains(e)));
+    const score = (e) => textOf(e).trim().length * 4 + (isVisible(e) ? 2 : 0) + (isPlain(e) ? 0 : 1);
+    const body = rest.sort((x, y) => score(y) - score(x))[0] || null;
+    return { title, body, url };
   }
   const isPlain = (el) => el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
   const textOf = (el) => (el ? (isPlain(el) ? el.value : el.innerText) || '' : '');
@@ -366,6 +373,8 @@
       out.append(el('div', 'wae-rc-note', `Can't verify: ${result.cannot_verify.join('; ')}`));
     }
     out.append(el('div', 'wae-rc-note', sourcesLine(ctx)));
+    // Shown so a misread draft is obvious instead of producing a confident wrong verdict.
+    out.append(el('div', 'wae-rc-note', `Read from this page: title ${draft.title.length} characters, body ${draft.body.length} characters.`));
     setBadge(result.verdict, result.violations.length + ctx.blockers.length);
 
     // What the "Fix my post" button does once the check is back.
