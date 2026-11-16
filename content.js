@@ -39,19 +39,26 @@
   }
   // The field's name is sometimes on the element and sometimes on the web component wrapping it.
   const nameOf = (e) => e.getAttribute('name') || e.getRootNode().host?.getAttribute?.('name') || '';
-  const isVisible = (e) => { const r = e.getBoundingClientRect(); return r.width > 20 && r.height > 8; };
+  const isVisible = (e) => {
+    const r = e.getBoundingClientRect();
+    return r.width > 20 && r.height > 8 && (e.checkVisibility?.({ visibilityProperty: true }) ?? true);
+  };
 
-  // Reddit keeps several candidate body fields on the page at once (the rich editor, a markdown
-  // textarea, hidden form mirrors), and which one holds the text depends on the editor mode.
-  // So the body is whichever editable currently holds the most text, not the first match.
+  // The body is the editor the author can see. Hidden fields are never read: Reddit's page carries
+  // hidden textareas (captcha tokens, serialised copies of the post) whose contents are not prose,
+  // and sending one of those as "the body" makes the check judge machine text.
   function fields() {
     const els = editables();
     const title = els.find((e) => nameOf(e) === 'title') || null;
     const url = els.find((e) => ['link', 'url'].includes(nameOf(e))) || null;
-    const rest = els.filter((e) => e !== title && e !== url
+    const rest = els.filter((e) => e !== title && e !== url && isVisible(e)
+      && !/captcha|token|flair|search/i.test(nameOf(e))
       && !els.some((o) => o !== e && o !== title && o.contains(e)));
-    const score = (e) => textOf(e).trim().length * 4 + (isVisible(e) ? 2 : 0) + (isPlain(e) ? 0 : 1);
-    const body = rest.sort((x, y) => score(y) - score(x))[0] || null;
+    const area = (e) => { const r = e.getBoundingClientRect(); return r.width * r.height; };
+    const filled = rest.filter((e) => textOf(e).trim());
+    const pool = filled.length ? filled : rest;
+    // With several visible candidates, the largest box is the post editor.
+    const body = pool.sort((x, y) => area(y) - area(x))[0] || null;
     return { title, body, url };
   }
   const isPlain = (el) => el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
@@ -137,7 +144,9 @@
     const a = about?.data || {};
     const u = me?.data || me || {};
     const out = {
-      rules: (rulesJson.rules || []).map((r) => ({ name: r.short_name, description: r.description })),
+      // Rules marked comment-only don't apply to a post.
+      rules: (rulesJson.rules || []).filter((r) => r.kind !== 'comment')
+        .map((r) => ({ name: r.short_name, description: r.description })),
       sidebar: [a.submit_text, a.description].filter(Boolean).join('\n\n'),
       wiki: [wikiRules?.data?.content_md, wikiIndex?.data?.content_md].filter(Boolean).join('\n\n').slice(0, 8000),
       pinned: (hot?.data?.children || []).map((c) => c.data).filter((p) => p?.stickied)
@@ -366,6 +375,7 @@
     for (const v of result.violations) {
       const item = el('div', 'wae-rc-item');
       item.append(el('div', 'wae-rc-rule', v.rule), el('div', '', v.why));
+      if (v.rule_quote) item.append(el('div', 'wae-rc-quote', `The rule says: “${v.rule_quote}”`));
       if (v.fix) item.append(el('div', 'wae-rc-fix', `Fix: ${v.fix}`));
       if (quick.includes(v)) {
         const change = el('div', 'wae-rc-change');
@@ -383,7 +393,8 @@
     }
     out.append(el('div', 'wae-rc-note', sourcesLine(ctx)));
     // Shown so a misread draft is obvious instead of producing a confident wrong verdict.
-    out.append(el('div', 'wae-rc-note', `Read from this page: title ${draft.title.length} characters, body ${draft.body.length} characters.`));
+    const preview = draft.body.replace(/\s+/g, ' ').slice(0, 70);
+    out.append(el('div', 'wae-rc-note', `Read from this page: title ${draft.title.length} characters, body ${draft.body.length} characters${preview ? `, starting “${preview}…”` : ''}`));
     setBadge(result.verdict, result.violations.length + ctx.blockers.length);
 
     // What the "Fix my post" button does once the check is back.

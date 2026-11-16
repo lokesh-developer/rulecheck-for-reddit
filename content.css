@@ -41,3 +41,5 @@
 .wae-rc-change ins{background:#1d4a26;color:#b9f0c2}
 }
 .wae-rc-body>.wae-rc-btn2{margin-top:0}
+.wae-rc-quote{color:#666;font-size:12px;font-style:italic;margin-top:2px}
+@media (prefers-color-scheme:dark){.wae-rc-quote{color:#aaa}}
