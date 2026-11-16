@@ -393,7 +393,6 @@
     const n = est.people.length;
     const sorted = (k) => est.people.map((x) => x[k]).sort((x, y) => x - y);
     const mid = (k) => sorted(k)[Math.floor(n / 2)];
-    const line = (label, k, mine) => `${label}: typical ${mid(k)}, lowest ${sorted(k)[0]}${mine == null ? '' : `, yours ${mine}`}`;
     const verdict = (cls, msg) => box.append(el('div', `wae-rc-verdict wae-rc-${cls}`, msg));
     const note = (msg) => box.append(el('div', 'wae-rc-note', msg));
 
@@ -414,11 +413,26 @@
       else if (below / n < 0.15) verdict('risky', `Only ${below} of ${n} recent posters had less karma than you. Those few may be exceptions the moderators approved.`);
       else verdict('no_published_rule_broken', `${below} of ${n} recent posters had less karma than you.`);
     }
-    note(`From the last ${n} people whose posts stayed up (posts only, not comments). "Typical" is the middle poster: half had more, half had less.`);
-    note(line('Total karma', 'total', acct?.total_karma));
-    note(line('Post karma', 'post', acct?.link_karma));
-    note(line('Comment karma', 'comment', acct?.comment_karma));
-    note(line('Account age in days when posting', 'ageDays', acct?.age_days));
+    // The typical poster leads; the lowest is mostly an exception, so it is a footnote.
+    const num = (v) => Number(v).toLocaleString('en-US');
+    const row = (label, k, mine, yours) => {
+      const r = el('div', 'wae-rc-row');
+      r.append(el('strong', '', num(mid(k))), ` ${label}`);
+      if (mine != null) r.append(el('span', 'wae-rc-you', ` (${yours}: ${num(mine)})`));
+      return r;
+    };
+    const card = el('div', 'wae-rc-typical');
+    card.append(el('div', 'wae-rc-rule', 'A typical poster here has:'),
+      row('karma', 'total', acct?.total_karma, 'you'),
+      row('post karma', 'post', acct?.link_karma, 'you'),
+      row('comment karma', 'comment', acct?.comment_karma, 'you'));
+    const age = el('div', 'wae-rc-row');
+    age.append('an account ', el('strong', '', num(mid('ageDays'))), ' days old');
+    if (acct) age.append(el('span', 'wae-rc-you', ` (yours: ${num(acct.age_days)})`));
+    card.append(age);
+    box.append(card);
+    note(`Lowest that got through: ${num(sorted('total')[0])} karma, ${num(sorted('ageDays')[0])} days old. Usually an exception.`);
+    note(`Based on the last ${n} people whose posts stayed up (posts only, not comments). "Typical" is the middle poster: half had more, half had less.`);
     note("This is a sample, not the real limit. Karma shown is today's, not on the day they posted, and a subreddit can count karma earned inside it, which nobody else can see.");
   }
 
