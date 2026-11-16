@@ -393,7 +393,7 @@
     const n = est.people.length;
     const sorted = (k) => est.people.map((x) => x[k]).sort((x, y) => x - y);
     const mid = (k) => sorted(k)[Math.floor(n / 2)];
-    const line = (label, k, mine) => `${label}: lowest ${sorted(k)[0]}, middle ${mid(k)}${mine == null ? '' : `, yours ${mine}`}`;
+    const line = (label, k, mine) => `${label}: typical ${mid(k)}, lowest ${sorted(k)[0]}${mine == null ? '' : `, yours ${mine}`}`;
     const verdict = (cls, msg) => box.append(el('div', `wae-rc-verdict wae-rc-${cls}`, msg));
     const note = (msg) => box.append(el('div', 'wae-rc-note', msg));
 
@@ -414,7 +414,7 @@
       else if (below / n < 0.15) verdict('risky', `Only ${below} of ${n} recent posters had less karma than you. Those few may be exceptions the moderators approved.`);
       else verdict('no_published_rule_broken', `${below} of ${n} recent posters had less karma than you.`);
     }
-    note(`From the last ${n} people whose posts stayed up (posts only, not comments):`);
+    note(`From the last ${n} people whose posts stayed up (posts only, not comments). "Typical" is the middle poster: half had more, half had less.`);
     note(line('Total karma', 'total', acct?.total_karma));
     note(line('Post karma', 'post', acct?.link_karma));
     note(line('Comment karma', 'comment', acct?.comment_karma));
