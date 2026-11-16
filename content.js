@@ -291,43 +291,92 @@
   // A hidden karma limit can't be read, but it can be bounded: removed posts vanish from the
   // subreddit and surviving ones stay, so nobody who posted successfully was under the limit.
   // The lowest-karma recent poster is therefore a ceiling on where the limit can be.
+  // Reddit serves the newest-posts list in several formats and refuses some of them to some
+  // sessions, so each is tried in turn. Every one returns [{ author, created (unix seconds) }]
+  // with moderators' and pinned posts left out where the format says which those are.
+  async function recentPosts(sub) {
+    const page = async (path) => {
+      const r = await fetch(`${location.origin}${path}`, { credentials: 'include' });
+      if (!r.ok) throw new Error(String(r.status));
+      return r;
+    };
+    const real = (a) => a && a !== '[deleted]' && a !== 'AutoModerator';
+    const sources = {
+      async json() {
+        const j = await (await page(`/r/${sub}/new.json?limit=100&raw_json=1`)).json();
+        return (j?.data?.children || []).map((ch) => ch.data)
+          .filter((p) => p && !p.stickied && p.distinguished !== 'moderator' && !p.removed_by_category)
+          .map((p) => ({ author: p.author, created: p.created_utc }));
+      },
+      async feed() {
+        const xml = new DOMParser().parseFromString(await (await page(`/r/${sub}/new/.rss?limit=100`)).text(), 'text/xml');
+        return [...xml.querySelectorAll('entry')].map((e) => ({
+          author: (e.querySelector('author > name')?.textContent || '').replace(/^\/?u\//, ''),
+          created: Date.parse(e.querySelector('published, updated')?.textContent || '') / 1000,
+        }));
+      },
+      async html() {
+        const out = [];
+        let path = `/r/${sub}/new/`;
+        for (let i = 0; i < 4 && path; i++) { // the page lists a few posts and links to the next batch
+          const doc = new DOMParser().parseFromString(await (await page(path)).text(), 'text/html');
+          for (const p of doc.querySelectorAll('shreddit-post[author]')) {
+            if (p.hasAttribute('stickied') || p.hasAttribute('pinned')) continue;
+            out.push({ author: p.getAttribute('author'), created: Date.parse(p.getAttribute('created-timestamp') || '') / 1000 });
+          }
+          path = doc.querySelector('faceplate-partial[src*="more-posts"]')?.getAttribute('src') || '';
+        }
+        return out;
+      },
+    };
+    const failures = [];
+    for (const [name, load] of Object.entries(sources)) {
+      try {
+        const posts = (await load()).filter((p) => real(p.author) && Number.isFinite(p.created));
+        if (posts.length >= 5) return posts;
+        failures.push(`${name}: ${posts.length} posts`);
+      } catch (e) {
+        failures.push(`${name}: ${e.message}`);
+      }
+    }
+    throw new Error(`Reddit wouldn't give the list of recent posts (${failures.join(', ')}).`);
+  }
+
   const SAMPLE_AUTHORS = 40;
   async function estimateGate(sub) {
     const key = sub.toLowerCase();
     const { gateEstimates = {} } = await chrome.storage.local.get({ gateEstimates: {} });
     if (gateEstimates[key] && Date.now() - gateEstimates[key].at < 86400000) return gateEstimates[key];
 
-    const get = async (path) => {
-      const r = await fetch(`${location.origin}${path}`, { credentials: 'include' });
-      if (!r.ok) throw new Error(`Reddit returned ${r.status}`);
-      return r.json();
-    };
-    const listing = await get(`/r/${sub}/new.json?limit=100`);
-    // Moderators and pinned posts are exempt from the limit, so they say nothing about it.
-    const posts = (listing?.data?.children || []).map((ch) => ch.data).filter((p) => p && !p.stickied
-      && p.author && p.author !== '[deleted]' && p.author !== 'AutoModerator'
-      && p.distinguished !== 'moderator' && !p.removed_by_category);
+    const posts = await recentPosts(sub);
     const firstPost = new Map();
     for (const p of posts) if (!firstPost.has(p.author)) firstPost.set(p.author, p);
     const authors = [...firstPost.keys()].slice(0, SAMPLE_AUTHORS);
 
     const people = [];
+    const refused = [];
     let next = 0;
     const worker = async () => {
       while (next < authors.length) {
         const name = authors[next++];
-        const u = (await get(`/user/${encodeURIComponent(name)}/about.json`).catch(() => null))?.data;
+        const r = await fetch(`${location.origin}/user/${encodeURIComponent(name)}/about.json`, { credentials: 'include' }).catch(() => null);
+        if (!r?.ok) { refused.push(r?.status || 'network error'); continue; }
+        const u = (await r.json().catch(() => null))?.data;
         if (!u || u.is_suspended || u.created_utc == null) continue;
         people.push({
           total: u.total_karma ?? ((u.link_karma || 0) + (u.comment_karma || 0)),
           comment: u.comment_karma || 0,
           // Age on the day they posted, which is what a limit would have tested.
-          ageDays: Math.max(0, Math.floor((firstPost.get(name).created_utc - u.created_utc) / 86400)),
+          ageDays: Math.max(0, Math.floor((firstPost.get(name).created - u.created_utc) / 86400)),
         });
       }
     };
     await Promise.all(Array.from({ length: 4 }, worker)); // a few at a time, to stay polite to Reddit
-    if (people.length < 5) throw new Error('Too few recent posts to estimate from.');
+    if (people.length < 5) {
+      throw new Error(refused.length
+        ? `found ${authors.length} recent posters, but Reddit refused their profile lookups (${refused[0]}).`
+        : `only ${people.length} usable recent posters, too few to estimate from.`);
+    }
 
     const min = (k) => Math.min(...people.map((x) => x[k]));
     const est = { at: Date.now(), n: people.length, total: min('total'), comment: min('comment'), ageDays: min('ageDays') };
