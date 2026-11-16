@@ -42,6 +42,12 @@
   <label for="model-anthropic">Model</label><input id="model-anthropic" type="text">
 </fieldset>
 
+<fieldset>
+  <legend>Check while I type</legend>
+  <label style="font-weight:400"><input id="auto" type="checkbox"> Check my draft automatically when I pause typing</label>
+  <p id="auto-warn"><small><strong>Caution:</strong> this uses more of your API credits. Every pause in typing sends another request to your provider, so one post can cost many checks instead of one. Free-tier keys can hit their rate limit. Leave it off to check only when you press a button.</small></p>
+</fieldset>
+
 <button id="save">Save</button><span id="status"></span>
 <script src="options.js"></script>
 </body>

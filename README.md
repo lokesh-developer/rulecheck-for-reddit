@@ -13,10 +13,11 @@ By [We Are Engineer](https://projects.weareengineer.com). Unofficial; not affili
 
 ## How it works
 
-- About two seconds after you stop typing, the draft is checked (at most once every six seconds).
-  Untick "Check while I type" in the panel to check only when you click "Check now".
+- "Fix my post" checks the draft and rewrites it to follow the rules in one click. "Just check" only reports.
+- Checking while you type is off by default because it uses more API credits. Turn it on in the settings;
+  it then checks about two seconds after you stop typing, at most once every six seconds.
 - A badge on the corner of the post editor shows the result: a tick, or the number of issues.
-- Each issue can offer a one-click fix; "Rewrite my post to follow the rules" replaces the whole draft.
+- Each issue can also offer its own one-click fix.
   "Undo" reverts the last change.
 
 ## Privacy

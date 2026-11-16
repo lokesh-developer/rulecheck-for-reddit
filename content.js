@@ -7,11 +7,17 @@
 
   const rulesCache = new Map();
   let panel = null, badge = null, ui = null;
-  let autoOn = true, timer = null, inFlight = false, pending = false;
+  let autoOn = false, timer = null, inFlight = false, pending = false;
   let lastKey = '', lastRun = 0, undo = null;
   let found = { title: null, body: null, url: null };
 
-  chrome.storage.local.get({ autoCheck: true }).then((s) => { autoOn = s.autoCheck; });
+  // Checking while typing costs a provider call per pause, so it is opt-in from the settings page.
+  chrome.storage.local.get({ autoCheck: false }).then((s) => { autoOn = s.autoCheck; });
+  chrome.storage.onChanged.addListener((changes) => {
+    if (!changes.autoCheck) return;
+    autoOn = changes.autoCheck.newValue;
+    if (!autoOn) clearTimeout(timer);
+  });
 
   const isSubmitPage = () => /\/submit\/?$/.test(location.pathname) || /\/submit\//.test(location.pathname);
   const subFromPath = () => (location.pathname.match(/^\/r\/([A-Za-z0-9_]+)/) || [])[1] || '';
@@ -184,28 +190,20 @@
     const subInput = el('input', 'wae-rc-sub');
     subInput.placeholder = 'subreddit (without r/)';
     subInput.addEventListener('input', schedule);
-    const btn = button('wae-rc-btn', 'Check now', () => run(true));
-    const autoLabel = el('label', 'wae-rc-auto');
-    const auto = el('input');
-    auto.type = 'checkbox';
-    auto.checked = autoOn;
-    auto.addEventListener('change', () => {
-      autoOn = auto.checked;
-      chrome.storage.local.set({ autoCheck: autoOn });
-      if (autoOn) schedule(); else clearTimeout(timer);
-    });
-    autoLabel.append(auto, ' Check while I type');
+    const fixBtn = button('wae-rc-btn', 'Fix my post', () => run(true, true));
+    fixBtn.title = 'Checks the draft and rewrites it to follow the rules. You can undo it.';
+    const btn = button('wae-rc-btn2', 'Just check', () => run(true));
     const out = el('div', 'wae-rc-out');
     const foot = el('div', 'wae-rc-foot',
       'Your draft is sent to your chosen AI provider for each check. AutoModerator, karma gates and mod discretion are invisible to this tool.');
-    bodyBox.append(subInput, btn, autoLabel, out, foot);
+    bodyBox.append(subInput, fixBtn, btn, out, foot);
     root.append(head, bodyBox);
 
     function setOpen(open) {
       bodyBox.hidden = !open;
       toggle.textContent = open ? '–' : '+';
     }
-    ui = { subInput, btn, out, setOpen, isOpen: () => !bodyBox.hidden };
+    ui = { subInput, btn, fixBtn, out, setOpen, isOpen: () => !bodyBox.hidden };
     return root;
   }
 
@@ -242,7 +240,7 @@
     timer = setTimeout(() => run(false), Math.max(DEBOUNCE_MS, MIN_GAP_MS - (Date.now() - lastRun)));
   }
 
-  async function run(manual) {
+  async function run(manual, autofix) {
     const sub = ui.subInput.value.trim().replace(/^\/?r\//, '');
     const draft = readDraft();
     const size = draft.title.length + draft.body.length;
@@ -260,20 +258,22 @@
     inFlight = true;
     lastKey = key;
     lastRun = Date.now();
-    ui.btn.disabled = true;
-    ui.btn.textContent = 'Checking…';
+    ui.btn.disabled = ui.fixBtn.disabled = true;
+    (autofix ? ui.fixBtn : ui.btn).textContent = autofix ? 'Fixing…' : 'Checking…';
     setBadge('busy');
     try {
       const ctx = await fetchContext(sub);
       const res = await chrome.runtime.sendMessage({ type: 'rulecheck', payload: { sub, ...draft, ctx } });
       if (!res?.ok) throw new Error(res?.error || 'No response from the extension.');
-      render(res.result, ctx, draft);
+      const fix = render(res.result, ctx, draft);
+      if (autofix) await fix();
     } catch (e) {
       showError(String(e.message || e));
     } finally {
       inFlight = false;
-      ui.btn.disabled = false;
-      ui.btn.textContent = 'Check now';
+      ui.btn.disabled = ui.fixBtn.disabled = false;
+      ui.btn.textContent = 'Just check';
+      ui.fixBtn.textContent = 'Fix my post';
       if (pending) { pending = false; schedule(); }
     }
   }
@@ -325,17 +325,17 @@
       undoBtn.hidden = failed.length === edits.length;
     };
 
+    const rewrite = () => apply([
+      result.rewritten_title && { field: 'title', text: result.rewritten_title },
+      result.rewritten_body && { field: 'body', text: result.rewritten_body },
+    ].filter(Boolean), 'Post rewritten. Read it before you submit, or press Undo.');
+    const applyQuick = () => apply(
+      quick.map((v) => ({ field: v.field, text: v.replacement, quote: v.quote })),
+      'Quick fixes applied. Read it before you submit, or press Undo.');
+
     const bar = el('div', 'wae-rc-bar');
-    if (hasRewrite) {
-      bar.append(button('wae-rc-btn', 'Rewrite my post to follow the rules', () => apply([
-        result.rewritten_title && { field: 'title', text: result.rewritten_title },
-        result.rewritten_body && { field: 'body', text: result.rewritten_body },
-      ].filter(Boolean), 'Post rewritten. Read it before you submit.')));
-    }
-    if (quick.length > 1) {
-      bar.append(button('wae-rc-btn2', `Apply all ${quick.length} quick fixes`, () => apply(
-        quick.map((v) => ({ field: v.field, text: v.replacement, quote: v.quote })), 'Quick fixes applied.')));
-    }
+    if (hasRewrite) bar.append(button('wae-rc-btn2', 'Rewrite my post', rewrite));
+    if (quick.length > 1) bar.append(button('wae-rc-btn2', `Apply all ${quick.length} quick fixes`, applyQuick));
     const undoBtn = button('wae-rc-btn2', 'Undo', async () => {
       const f = fields();
       await writeField(f.title, undo.title);
@@ -367,6 +367,15 @@
     }
     out.append(el('div', 'wae-rc-note', sourcesLine(ctx)));
     setBadge(result.verdict, result.violations.length + ctx.blockers.length);
+
+    // What the "Fix my post" button does once the check is back.
+    return async () => {
+      if (hasRewrite) return rewrite();
+      if (quick.length) return applyQuick();
+      say(result.violations.length
+        ? "This can't be fixed by rewording. See the issues below."
+        : 'Nothing to fix.');
+    };
   }
 
   function sync() {
