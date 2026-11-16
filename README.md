@@ -32,6 +32,16 @@ It shows how your total, post and comment karma compare with theirs, and if you 
 there, the range the hidden limit probably falls in. It reads public Reddit pages from your session
 (one listing plus one request per author), uses no AI credits, and is cached for a day per subreddit.
 
+## Reddit spam-filter risk
+
+Separate from subreddit rules, the panel shows a Low / Medium / High risk that Reddit's own sitewide
+filter removes the post, with the reasons: how much you have posted in the last 24 hours, whether this
+draft repeats a recent title or link, whether you keep linking the same site, your balance of post and
+comment karma, and whether the draft links to a download, a link shortener, a file host or a chat invite.
+A timer shows how long to wait before posting again. The filter itself is private, so these are warning
+signs and the waiting times are this tool's rule of thumb. Your recent posts are read from your own
+profile in your browser and are not sent to the AI provider.
+
 ## Privacy
 
 Each check sends the draft, the subreddit's rule sources, and your karma and account age (no username)

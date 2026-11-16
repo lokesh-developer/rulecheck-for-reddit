@@ -51,3 +51,8 @@
 .wae-rc-row{padding-left:8px}
 .wae-rc-you{color:#666}
 @media (prefers-color-scheme:dark){.wae-rc-typical{border-color:#444}.wae-rc-you{color:#aaa}}
+.wae-rc-timer{font-weight:600}
+.wae-rc-timer[data-waiting=true]{color:#8c1c13}
+.wae-rc-timer:empty{display:none}
+.wae-rc-reason{padding-left:10px;border-left:3px solid #ccc}
+@media (prefers-color-scheme:dark){.wae-rc-timer[data-waiting=true]{color:#ff9a90}.wae-rc-reason{border-color:#555}}

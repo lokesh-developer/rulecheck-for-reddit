@@ -181,6 +181,8 @@
         restrict_posting: a.restrict_posting, allow_images: a.allow_images,
         allow_videos: a.allow_videos, over18: a.over18,
       },
+      // Kept out of `account`, which is sent to the AI provider; the name never leaves the browser.
+      userName: u.name || '',
       account: u.created_utc ? {
         link_karma: u.link_karma || 0, comment_karma: u.comment_karma || 0,
         total_karma: u.total_karma ?? ((u.link_karma || 0) + (u.comment_karma || 0)),
@@ -436,16 +438,169 @@
     note("This is a sample, not the real limit. Karma shown is today's, not on the day they posted, and a subreddit can count karma earned inside it, which nobody else can see.");
   }
 
+  // ---- Reddit spam-filter risk -------------------------------------------------------------
+  // Reddit's own filter is private. These are the account and draft signals it is widely
+  // understood to react to, read from the author's own profile. They are warnings, not a verdict.
+
+  const linksIn = (text) => String(text || '').match(/https?:\/\/[^\s)\]>"']+/g) || [];
+  const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } };
+  const sameUrl = (u) => String(u).replace(/^https?:\/\/(www\.)?/, '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase();
+  const sameText = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const ownHosts = /(^|\.)(reddit\.com|redd\.it|redditmedia\.com)$/;
+  const span = (ms) => {
+    const m = Math.max(0, Math.ceil(ms / 60000));
+    if (m >= 2880) return `${Math.floor(m / 1440)} days`;
+    return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+  };
+
+  // The author's own recent posts: [{ title, created (ms), sub, links[] }], newest first.
+  const historyCache = new Map();
+  async function ownRecentPosts(name) {
+    const hit = historyCache.get(name);
+    if (hit && Date.now() - hit.at < 120000) return hit.posts;
+    const page = async (path) => {
+      const r = await fetch(`${location.origin}${path}`, { credentials: 'include' });
+      if (!r.ok) throw new Error(String(r.status));
+      return r;
+    };
+    const user = encodeURIComponent(name);
+    const sources = [
+      async () => ((await (await page(`/user/${user}/submitted.json?limit=25&sort=new&raw_json=1`)).json())?.data?.children || [])
+        .map((ch) => ch.data).map((p) => ({
+          title: p.title, created: p.created_utc * 1000, sub: p.subreddit,
+          links: p.is_self ? linksIn(p.selftext) : [p.url],
+        })),
+      async () => [...new DOMParser().parseFromString(await (await page(`/user/${user}/submitted/.rss?limit=25`)).text(), 'text/xml')
+        .querySelectorAll('entry')].map((e) => ({
+        title: e.querySelector('title')?.textContent || '',
+        created: Date.parse(e.querySelector('published, updated')?.textContent || ''),
+        sub: e.querySelector('category')?.getAttribute('term') || '',
+        links: linksIn(e.querySelector('content')?.textContent || ''),
+      })),
+      async () => [...new DOMParser().parseFromString(await (await page(`/user/${user}/submitted/`)).text(), 'text/html')
+        .querySelectorAll('shreddit-post')].map((p) => ({
+        title: p.getAttribute('post-title') || '',
+        created: Date.parse(p.getAttribute('created-timestamp') || ''),
+        sub: (p.getAttribute('subreddit-prefixed-name') || '').replace(/^r\//, ''),
+        links: [p.getAttribute('content-href')].filter(Boolean),
+      })),
+    ];
+    for (const load of sources) {
+      try {
+        const posts = (await load()).filter((p) => Number.isFinite(p.created))
+          .map((p) => ({ ...p, links: p.links.filter((u) => u && !ownHosts.test(hostOf(u))) }))
+          .sort((x, y) => y.created - x.created);
+        historyCache.set(name, { at: Date.now(), posts });
+        return posts;
+      } catch { /* try the next format */ }
+    }
+    return null; // Reddit wouldn't share it; the warning says so instead of guessing
+  }
+
+  const DOWNLOAD = /\.(zip|rar|7z|exe|msi|dmg|pkg|apk|crx|jar)([?#]|$)|github\.com\/[^/]+\/[^/]+\/(releases|archive)\b/i;
+  const RISKY_HOSTS = /(^|\.)(bit\.ly|tinyurl\.com|t\.co|goo\.gl|cutt\.ly|is\.gd|rb\.gy|mega\.nz|mediafire\.com|dropbox\.com|drive\.google\.com|t\.me|discord\.gg)$/;
+
+  // Suggested gaps between posts. They are this tool's rule of thumb, not anything Reddit publishes.
+  const cooldownFor = (acct) => (!acct || acct.total_karma < 100 ? 6 : acct.total_karma < 1000 ? 1 : 0.25) * 3600000;
+  const REPEAT_GAP = 24 * 3600000;
+
+  function spamRisk(ctx, history, draft) {
+    const acct = ctx.account;
+    const now = Date.now();
+    const reasons = [];
+    const add = (weight, text) => reasons.push({ weight, text });
+    const links = [draft.url, ...linksIn(draft.title), ...linksIn(draft.body)].filter(Boolean)
+      .map((u) => (/^https?:/.test(u) ? u : `https://${u}`)).filter((u) => hostOf(u) && !ownHosts.test(hostOf(u)));
+    let waitUntil = 0, waitWhy = '';
+    const wait = (until, why) => { if (until > waitUntil) { waitUntil = until; waitWhy = why; } };
+
+    // 1. How much, and how repetitively, the author has posted lately.
+    if (history) {
+      const day = history.filter((p) => now - p.created < 86400000);
+      if (day.length >= 3) add(3, `You've made ${day.length} posts in the last 24 hours.`);
+      else if (day.length && acct && acct.total_karma < 1000) add(1, `You've already posted ${day.length === 1 ? 'once' : 'twice'} in the last 24 hours.`);
+      const recent = history.filter((p) => now - p.created < 2 * 86400000);
+      const title = sameText(draft.title);
+      const twin = recent.find((p) => (title.length > 8 && sameText(p.title) === title)
+        || p.links.some((u) => links.some((l) => sameUrl(l) === sameUrl(u))));
+      if (twin) {
+        add(3, `You posted the same ${sameText(twin.title) === title ? 'title' : 'link'} in r/${twin.sub} ${span(now - twin.created)} ago. Repeating a post across subreddits is the commonest reason Reddit removes one.`);
+        wait(twin.created + REPEAT_GAP, 'before posting this same content again');
+      }
+      const counts = {};
+      for (const p of history) for (const h of new Set(p.links.map(hostOf))) counts[h] = (counts[h] || 0) + 1;
+      const repeated = [...new Set(links.map(hostOf))].find((h) => counts[h] >= 2);
+      if (repeated) add(2, `You've linked ${repeated} in ${counts[repeated]} of your last ${history.length} posts. Linking one site again and again reads as promotion.`);
+      if (history[0]) wait(history[0].created + cooldownFor(acct), 'before your next post');
+    }
+
+    // 2. What kind of account this looks like.
+    if (acct) {
+      if (acct.total_karma < 1000 && acct.comment_karma < acct.link_karma / 2) {
+        add(2, `Most of your karma is from posts (${acct.link_karma}), not comments (${acct.comment_karma}). Accounts that post but rarely comment look promotional.`);
+      }
+      if (acct.total_karma < LOW_KARMA) add(1, `Your account has only ${acct.total_karma} karma, so Reddit's filter trusts it less.`);
+    }
+
+    // 3. What the draft links to.
+    const download = links.find((u) => DOWNLOAD.test(u));
+    const risky = links.find((u) => RISKY_HOSTS.test(hostOf(u)));
+    if (download) add(acct && acct.total_karma < 1000 ? 3 : 1, `The draft links to a download (${hostOf(download)}). Download links from newer accounts are often filtered.`);
+    if (risky) add(2, `The draft links to ${hostOf(risky)}. Shortened links, file hosts and chat invites are often filtered.`);
+    if (links.length && !download && !risky && acct && acct.total_karma < LOW_KARMA) add(1, 'The draft contains a link, and links from low-karma accounts are filtered more often.');
+
+    const score = reasons.reduce((n, r) => n + r.weight, 0);
+    return {
+      level: score >= 5 ? 'high' : score >= 2 ? 'medium' : 'low',
+      reasons: reasons.sort((x, y) => y.weight - x.weight).map((r) => r.text),
+      waitUntil, waitWhy, lastPost: history?.[0]?.created || 0, known: !!history,
+    };
+  }
+
+  let spam = null; // { ctx, history, risk } for the subreddit in the panel
+  function renderSpam() {
+    if (!ui || !spam) return;
+    const risk = spam.risk = spamRisk(spam.ctx, spam.history, readDraft());
+    const cls = { high: 'likely_removed', medium: 'risky', low: 'no_published_rule_broken' }[risk.level];
+    const label = { high: 'High', medium: 'Medium', low: 'Low' }[risk.level];
+    const box = ui.spam;
+    box.replaceChildren(el('div', `wae-rc-verdict wae-rc-${cls}`, `Reddit spam-filter risk: ${label}`));
+    box.append(ui.timer = el('div', 'wae-rc-timer'));
+    tickTimer();
+    for (const r of risk.reasons) box.append(el('div', 'wae-rc-reason', r));
+    if (!risk.known) box.append(el('div', 'wae-rc-note', "Couldn't read your recent posts, so repeat posting isn't checked."));
+    box.append(el('div', 'wae-rc-note', "Risk signals from your own account and this draft. Reddit's filter is private, so this is a warning, not a verdict."));
+  }
+  function tickTimer() {
+    const risk = spam?.risk;
+    if (!ui?.timer || !risk) return;
+    const left = risk.waitUntil - Date.now();
+    ui.timer.dataset.waiting = left > 0;
+    ui.timer.textContent = left > 0
+      ? `⏳ Wait ${span(left)} ${risk.waitWhy}.`
+      : risk.lastPost ? `No cooldown. Your last post was ${span(Date.now() - risk.lastPost)} ago.`
+        : risk.known ? 'No cooldown. No recent posts found.' : '';
+  }
+  let spamTimer = null;
+  const spamSoon = () => { clearTimeout(spamTimer); spamTimer = setTimeout(renderSpam, 600); };
+
   let preSub = '';
   async function preflight() {
     const sub = ui.subInput.value.trim().replace(/^\/?r\//, '');
     if (!sub || sub === preSub) return;
     preSub = sub;
     ui.pre.replaceChildren(el('div', 'wae-rc-note', `Reading r/${sub}…`));
+    spam = null;
+    ui.spam.replaceChildren();
     try {
       const ctx = await fetchContext(sub);
       const { removedIn = {} } = await chrome.storage.local.get({ removedIn: {} });
-      if (preSub === sub) renderPreflight(sub, ctx, removedIn[sub.toLowerCase()]);
+      if (preSub !== sub) return;
+      renderPreflight(sub, ctx, removedIn[sub.toLowerCase()]);
+      const history = ctx.userName ? await ownRecentPosts(ctx.userName) : null;
+      if (preSub !== sub) return;
+      spam = { ctx, history };
+      renderSpam();
     } catch (e) {
       if (preSub === sub) ui.pre.replaceChildren(el('div', 'wae-rc-note', `Couldn't read r/${sub}. Check the name.`));
     }
@@ -540,17 +695,18 @@
     fixBtn.title = 'Checks the draft and rewrites it to follow the rules. You can undo it.';
     const btn = button('wae-rc-btn2', 'Just check', () => run(true));
     const pre = el('div', 'wae-rc-pre');
+    const spamBox = el('div', 'wae-rc-pre wae-rc-spam');
     const out = el('div', 'wae-rc-out');
     const foot = el('div', 'wae-rc-foot',
       'Your draft is sent to your chosen AI provider for each check. AutoModerator, karma gates and mod discretion are invisible to this tool.');
-    bodyBox.append(subInput, pre, fixBtn, btn, out, foot);
+    bodyBox.append(subInput, pre, spamBox, fixBtn, btn, out, foot);
     root.append(head, bodyBox);
 
     function setOpen(open) {
       bodyBox.hidden = !open;
       toggle.textContent = open ? '–' : '+';
     }
-    ui = { subInput, pre, btn, fixBtn, out, setOpen, isOpen: () => !bodyBox.hidden };
+    ui = { subInput, pre, spam: spamBox, btn, fixBtn, out, setOpen, isOpen: () => !bodyBox.hidden };
     return root;
   }
 
@@ -750,11 +906,13 @@
       if (sub && !ui.subInput.value) ui.subInput.value = sub;
       if (document.activeElement !== ui.subInput) preflight();
       placeBadge();
+      tickTimer();
     } else if (panel) {
       panel.remove();
       badge.remove();
       panel = badge = ui = null;
       preSub = '';
+      spam = null;
       clearTimeout(timer);
       lastKey = '';
     }
@@ -762,7 +920,7 @@
 
   // Typing inside Reddit's web components still surfaces here because input events are composed.
   document.addEventListener('input', (e) => {
-    if (panel && !panel.contains(e.target)) schedule();
+    if (panel && !panel.contains(e.target)) { schedule(); spamSoon(); }
   }, true);
   addEventListener('scroll', placeBadge, { capture: true, passive: true });
   addEventListener('resize', placeBadge, { passive: true });
