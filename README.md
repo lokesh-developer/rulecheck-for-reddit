@@ -56,5 +56,5 @@ moderator discretion and Reddit's spam filters are invisible, so the best verdic
 ## Not built yet
 
 - Hosted paid tier (backend proxy, accounts, billing).
-- Privacy policy page, required for the Chrome Web Store listing.
-- Placeholder icons need replacing.
+
+The privacy policy is in [PRIVACY.md](PRIVACY.md). Icon sources are in `icons/src`.

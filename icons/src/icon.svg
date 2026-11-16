@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1673cf"/>
+      <stop offset="1" stop-color="#083f7c"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <!-- a post: card with a title line and two body lines -->
+  <rect x="24" y="26" width="68" height="76" rx="10" fill="#ffffff"/>
+  <rect x="34" y="40" width="40" height="8" rx="4" fill="#0b5cad"/>
+  <rect x="34" y="58" width="48" height="6" rx="3" fill="#b9cfe6"/>
+  <rect x="34" y="72" width="34" height="6" rx="3" fill="#b9cfe6"/>
+  <!-- the check that it passed -->
+  <circle cx="88" cy="88" r="26" fill="#1f9d4d" stroke="#083f7c" stroke-width="5"/>
+  <path d="M75 88.5 L84.5 98 L102 79" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
