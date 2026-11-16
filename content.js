@@ -346,7 +346,7 @@
   async function estimateGate(sub) {
     const key = sub.toLowerCase();
     const { gateEstimates = {} } = await chrome.storage.local.get({ gateEstimates: {} });
-    if (gateEstimates[key] && Date.now() - gateEstimates[key].at < 86400000) return gateEstimates[key];
+    if (gateEstimates[key]?.people && Date.now() - gateEstimates[key].at < 86400000) return gateEstimates[key];
 
     const posts = await recentPosts(sub);
     const firstPost = new Map();
@@ -365,6 +365,7 @@
         if (!u || u.is_suspended || u.created_utc == null) continue;
         people.push({
           total: u.total_karma ?? ((u.link_karma || 0) + (u.comment_karma || 0)),
+          post: u.link_karma || 0,
           comment: u.comment_karma || 0,
           // Age on the day they posted, which is what a limit would have tested.
           ageDays: Math.max(0, Math.floor((firstPost.get(name).created - u.created_utc) / 86400)),
@@ -378,22 +379,47 @@
         : `only ${people.length} usable recent posters, too few to estimate from.`);
     }
 
-    const min = (k) => Math.min(...people.map((x) => x[k]));
-    const est = { at: Date.now(), n: people.length, total: min('total'), comment: min('comment'), ageDays: min('ageDays') };
+    const est = { at: Date.now(), people };
     gateEstimates[key] = est;
     await chrome.storage.local.set({ gateEstimates });
     return est;
   }
 
-  function showEstimate(box, est, acct) {
+  // One low-karma poster proves little: moderators approve individual users, and karma can fall
+  // after posting. So the estimate reports where the author sits among all sampled posters, and a
+  // removal the author actually experienced outranks anything inferred from other people.
+  function showEstimate(box, est, acct, removed) {
     box.replaceChildren();
-    const under = acct && (acct.total_karma < est.total || acct.age_days < est.ageDays);
-    box.append(el('div', `wae-rc-verdict wae-rc-${under ? 'risky' : 'no_published_rule_broken'}`,
-      under ? 'You are below every recent poster who got through.' : 'Accounts like yours have posted here recently.'));
-    box.append(el('div', 'wae-rc-note',
-      `Of the last ${est.n} people whose posts stayed up, the lowest had ${est.total} karma (${est.comment} comment karma) and the newest account was ${est.ageDays} days old when it posted.`));
-    box.append(el('div', 'wae-rc-note',
-      `So any hidden limit is at most about ${est.total} karma and ${est.ageDays} days. It may be lower: this is a ceiling from a sample, not the real number, and karma shown is today's, not on the day they posted.`));
+    const n = est.people.length;
+    const sorted = (k) => est.people.map((x) => x[k]).sort((x, y) => x - y);
+    const mid = (k) => sorted(k)[Math.floor(n / 2)];
+    const line = (label, k, mine) => `${label}: lowest ${sorted(k)[0]}, middle ${mid(k)}${mine == null ? '' : `, yours ${mine}`}`;
+    const verdict = (cls, msg) => box.append(el('div', `wae-rc-verdict wae-rc-${cls}`, msg));
+    const note = (msg) => box.append(el('div', 'wae-rc-note', msg));
+
+    if (removed) {
+      // The limit is above what the author had when removed, and at or below the next poster up.
+      const above = sorted('total').filter((v) => v > removed.karma);
+      const exceptions = n - above.length;
+      verdict('likely_removed', above.length
+        ? `The hidden limit here is probably between ${removed.karma} and ${above[0]} karma.`
+        : `The hidden limit here is above ${removed.karma} karma.`);
+      note(`You were removed with ${removed.karma} karma, so the limit is higher than that.`
+        + (above.length ? ` The lowest recent poster above you had ${above[0]}.` : '')
+        + (acct ? ` You have ${acct.total_karma} now.` : ''));
+      if (exceptions) note(`${exceptions} of the ${n} recent posters had ${removed.karma} karma or less and still got through. They were most likely approved by the moderators, lost karma after posting, or the limit counts a kind of karma that isn't visible.`);
+    } else if (acct) {
+      const below = est.people.filter((x) => x.total < acct.total_karma).length;
+      if (below === 0) verdict('likely_removed', `All ${n} recent posters had more karma than you.`);
+      else if (below / n < 0.15) verdict('risky', `Only ${below} of ${n} recent posters had less karma than you. Those few may be exceptions the moderators approved.`);
+      else verdict('no_published_rule_broken', `${below} of ${n} recent posters had less karma than you.`);
+    }
+    note(`From the last ${n} people whose posts stayed up (posts only, not comments):`);
+    note(line('Total karma', 'total', acct?.total_karma));
+    note(line('Post karma', 'post', acct?.link_karma));
+    note(line('Comment karma', 'comment', acct?.comment_karma));
+    note(line('Account age in days when posting', 'ageDays', acct?.age_days));
+    note("This is a sample, not the real limit. Karma shown is today's, not on the day they posted, and a subreddit can count karma earned inside it, which nobody else can see.");
   }
 
   let preSub = '';
@@ -438,7 +464,7 @@
       estBtn.disabled = true;
       estBtn.textContent = 'Looking at recent posters…';
       try {
-        showEstimate(estBox, await estimateGate(sub), g.acct);
+        showEstimate(estBox, await estimateGate(sub), g.acct, removed);
         estBtn.remove();
       } catch (e) {
         estBox.replaceChildren(el('div', 'wae-rc-note', `Couldn't estimate: ${e.message || e}`));

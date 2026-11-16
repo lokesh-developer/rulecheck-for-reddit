@@ -28,7 +28,8 @@ AutoModerator limits commonly remove posts. "My post was removed here" remembers
 browser so the warning is specific next time. Unpublished limits themselves cannot be read by any tool.
 
 "Estimate the hidden karma limit" looks up the karma of up to 40 people whose recent posts stayed up.
-The lowest of them is a ceiling on any hidden limit. It reads public Reddit pages from your session
+It shows how your total, post and comment karma compare with theirs, and if you recorded a removal
+there, the range the hidden limit probably falls in. It reads public Reddit pages from your session
 (one listing plus one request per author), uses no AI credits, and is cached for a day per subreddit.
 
 ## Privacy
