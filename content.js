@@ -62,49 +62,55 @@
     return { title: textOf(f.title).trim(), body: textOf(f.body).trim(), url: textOf(f.url).trim() };
   }
 
+  const squash = (s) => s.replace(/\s+/g, ' ').trim();
+
   // Writes into Reddit's own fields. With `quote`, swaps just that passage; without, replaces everything.
-  // Returns false when the field refused the edit, so the caller can fall back to the clipboard.
+  // Reddit's fields keep their own state and ignore values set from script, so every edit is made
+  // the way a person would make it: focus, select, then type or paste. The result is read back, and
+  // false is returned unless the field really holds the intended text.
   async function writeField(el, text, quote) {
     if (!el) return false;
     const before = textOf(el);
     if (quote != null && !before.includes(quote)) return false;
     // Deleting a sentence shouldn't leave a double space behind.
     if (quote != null && text === '' && before.includes(`${quote} `)) quote += ' ';
+    const want = quote != null ? before.replace(quote, () => text) : text;
+    const landed = () => squash(textOf(el)) === squash(want);
+    if (landed()) return true;
+
+    el.focus();
     if (isPlain(el)) {
-      const next = quote != null ? before.replace(quote, () => text) : text;
-      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, next);
-      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return textOf(el) !== before;
+      const at = quote != null ? before.indexOf(quote) : 0;
+      el.setSelectionRange(at, quote != null ? at + quote.length : before.length);
+      document.execCommand(text === '' ? 'delete' : 'insertText', false, text);
+      await sleep(150); // controlled fields re-render from their own state
+      return landed();
     }
-    // Rich editor: it keeps its own state, so edits have to arrive as user-like input.
-    const range = document.createRange();
+
+    // Rich editor. Each blank line would become an empty paragraph, so paragraphs are one newline apart.
+    const paste = text.replace(/\n{2,}/g, '\n');
+    const sel = getSelection();
     if (quote != null) {
       const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
       let node, at = -1;
       while ((node = walker.nextNode())) { at = node.data.indexOf(quote); if (at >= 0) break; }
       if (!node) return false; // passage spans formatting; caller falls back
-      range.setStart(node, at);
-      range.setEnd(node, at + quote.length);
+      sel.setBaseAndExtent(node, at, node, at + quote.length);
     } else {
-      range.selectNodeContents(el);
+      sel.setBaseAndExtent(el, 0, el, el.childNodes.length);
     }
-    el.focus();
-    const sel = getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    if (text === '') {
+    await sleep(80); // the editor learns about the new selection asynchronously
+    if (paste === '') {
       document.execCommand('delete');
     } else {
       const dt = new DataTransfer();
-      dt.setData('text/plain', text);
+      dt.setData('text/plain', paste);
       const unhandled = el.dispatchEvent(new ClipboardEvent('paste',
         { clipboardData: dt, bubbles: true, cancelable: true, composed: true }));
-      if (unhandled) document.execCommand('insertText', false, text);
+      if (unhandled) document.execCommand('insertText', false, paste);
     }
-    await sleep(150); // editors repaint asynchronously
-    return textOf(el) !== before;
+    await sleep(250); // editors repaint asynchronously
+    return landed();
   }
 
   // Everything here is read from the user's own logged-in session, the same data
@@ -321,11 +327,14 @@
         if (!(await writeField(f[e.field], e.text, e.quote))) failed.push(e);
       }
       if (failed.length) {
-        const text = failed.map((e) => e.text).filter(Boolean).join('\n\n');
-        const copied = text && await navigator.clipboard.writeText(text).then(() => true, () => false);
-        say(copied
-          ? "Reddit's editor refused the edit. The new text is copied; paste it in yourself."
-          : "Reddit's editor refused the edit. Change it by hand using the fix above.");
+        // Put back anything a failed attempt disturbed before asking the user to do it by hand.
+        for (const name of new Set(failed.map((e) => e.field))) {
+          if (f[name] && squash(textOf(f[name])) !== squash(undo[name])) await writeField(f[name], undo[name]);
+        }
+        const text = failed.map((e) => (e.quote == null ? e.text : `${e.quote} → ${e.text || '(delete)'}`)).join('\n\n');
+        const copied = await navigator.clipboard.writeText(text).then(() => true, () => false);
+        const which = [...new Set(failed.map((e) => e.field))].join(' and ');
+        say(`Couldn't change the ${which} automatically. ${copied ? 'The new text is copied; paste it in yourself.' : 'Change it by hand using the fixes below.'}`);
       } else {
         say(done);
       }
