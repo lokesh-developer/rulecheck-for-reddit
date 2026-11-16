@@ -29,20 +29,69 @@
     return { title, body, url };
   }
 
-  async function fetchRules(sub) {
+  // Everything here is read from the user's own logged-in session, the same data
+  // their browser can already see. Only the published rules are mandatory; every
+  // other source is optional because many subreddits don't have it or hide it.
+  async function fetchContext(sub) {
     if (rulesCache.has(sub)) return rulesCache.get(sub);
     const get = async (path) => {
-      const r = await fetch(`${location.origin}/r/${sub}/${path}`, { credentials: 'include' });
-      if (!r.ok) throw new Error(`Reddit returned ${r.status} for r/${sub}`);
+      const r = await fetch(`${location.origin}${path}`, { credentials: 'include' });
+      if (!r.ok) throw new Error(`Reddit returned ${r.status} for ${path}`);
       return r.json();
     };
-    const [rulesJson, about] = await Promise.all([get('about/rules.json'), get('about.json').catch(() => null)]);
+    const opt = (path) => get(path).catch(() => null);
+    const [rulesJson, about, wikiIndex, wikiRules, hot, flairs, reqs, me] = await Promise.all([
+      get(`/r/${sub}/about/rules.json`),
+      opt(`/r/${sub}/about.json`),
+      opt(`/r/${sub}/wiki/index.json`),
+      opt(`/r/${sub}/wiki/rules.json`),
+      opt(`/r/${sub}/hot.json?limit=5`),
+      opt(`/r/${sub}/api/link_flair_v2.json`),
+      opt(`/api/v1/${sub}/post_requirements.json`),
+      opt('/api/me.json'),
+    ]);
+    const a = about?.data || {};
+    const u = me?.data || me || {};
     const out = {
       rules: (rulesJson.rules || []).map((r) => ({ name: r.short_name, description: r.description })),
-      sidebar: [about?.data?.submit_text, about?.data?.description].filter(Boolean).join('\n\n'),
+      sidebar: [a.submit_text, a.description].filter(Boolean).join('\n\n'),
+      wiki: [wikiRules?.data?.content_md, wikiIndex?.data?.content_md].filter(Boolean).join('\n\n').slice(0, 8000),
+      pinned: (hot?.data?.children || []).map((c) => c.data).filter((p) => p?.stickied)
+        .map((p) => ({ title: p.title, text: (p.selftext || '').slice(0, 3000) })),
+      flairs: Array.isArray(flairs) ? flairs.map((f) => f.text).filter(Boolean).slice(0, 40) : [],
+      requirements: reqs && typeof reqs === 'object' && !reqs.error ? reqs : null,
+      settings: {
+        submission_type: a.submission_type, subreddit_type: a.subreddit_type,
+        restrict_posting: a.restrict_posting, allow_images: a.allow_images,
+        allow_videos: a.allow_videos, over18: a.over18,
+      },
+      account: u.created_utc ? {
+        link_karma: u.link_karma, comment_karma: u.comment_karma,
+        age_days: Math.floor((Date.now() / 1000 - u.created_utc) / 86400),
+        verified_email: u.has_verified_email,
+      } : null,
+      // Facts that need no AI at all.
+      blockers: [
+        a.user_is_banned && 'You are banned from this subreddit.',
+        a.subreddit_type === 'private' && !a.user_is_contributor && 'This subreddit is private and you are not an approved member.',
+        a.subreddit_type === 'restricted' && a.user_is_contributor === false && a.user_is_moderator === false
+          && 'Only approved users can post in this subreddit.',
+      ].filter(Boolean),
     };
     rulesCache.set(sub, out);
     return out;
+  }
+
+  function sourcesLine(ctx) {
+    return 'Checked: ' + [
+      `${ctx.rules.length} rules`,
+      ctx.sidebar && 'sidebar',
+      ctx.wiki && 'wiki',
+      ctx.pinned.length && `${ctx.pinned.length} pinned post(s)`,
+      ctx.flairs.length && 'flair list',
+      ctx.requirements && 'post requirements',
+      ctx.account && 'your karma and account age',
+    ].filter(Boolean).join(', ');
   }
 
   function el(tag, cls, text) {
@@ -91,10 +140,12 @@
     btn.disabled = true;
     btn.textContent = 'Checking…';
     try {
-      const { rules, sidebar } = await fetchRules(sub);
-      const res = await chrome.runtime.sendMessage({ type: 'rulecheck', payload: { sub, ...draft, rules, sidebar } });
+      const ctx = await fetchContext(sub);
+      for (const b of ctx.blockers) out.append(el('div', 'wae-rc-verdict wae-rc-likely_removed', b));
+      const res = await chrome.runtime.sendMessage({ type: 'rulecheck', payload: { sub, ...draft, ctx } });
       if (!res?.ok) throw new Error(res?.error || 'No response from the extension.');
-      render(out, res.result, rules.length);
+      render(out, res.result, ctx.rules.length);
+      out.append(el('div', 'wae-rc-note', sourcesLine(ctx)));
     } catch (e) {
       out.append(el('p', 'wae-rc-err', String(e.message || e)));
     } finally {
