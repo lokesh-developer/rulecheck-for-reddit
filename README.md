@@ -20,6 +20,13 @@ By [We Are Engineer](https://projects.weareengineer.com). Unofficial; not affili
 - Each issue can also offer its own one-click fix.
   "Undo" reverts the last change.
 
+## Account check
+
+As soon as the subreddit is known, before any AI call, the panel shows your karma and account age,
+compares them with any limit the subreddit publishes, and warns when they are low enough that hidden
+AutoModerator limits commonly remove posts. "My post was removed here" remembers a removal in this
+browser so the warning is specific next time. Unpublished limits themselves cannot be read by any tool.
+
 ## Privacy
 
 Each check sends the draft, the subreddit's rule sources, and your karma and account age (no username)

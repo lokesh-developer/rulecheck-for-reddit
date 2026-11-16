@@ -43,3 +43,7 @@
 .wae-rc-body>.wae-rc-btn2{margin-top:0}
 .wae-rc-quote{color:#666;font-size:12px;font-style:italic;margin-top:2px}
 @media (prefers-color-scheme:dark){.wae-rc-quote{color:#aaa}}
+.wae-rc-pre{display:flex;flex-direction:column;gap:4px}
+.wae-rc-pre .wae-rc-verdict{margin:0;font-weight:600}
+.wae-rc-link2{align-self:flex-start;border:0;background:none;padding:0;color:#0b5cad;font:inherit;font-size:12px;text-decoration:underline;cursor:pointer}
+@media (prefers-color-scheme:dark){.wae-rc-link2{color:#6cb0f2}}

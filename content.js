@@ -182,7 +182,8 @@
         allow_videos: a.allow_videos, over18: a.over18,
       },
       account: u.created_utc ? {
-        link_karma: u.link_karma, comment_karma: u.comment_karma,
+        link_karma: u.link_karma || 0, comment_karma: u.comment_karma || 0,
+        total_karma: u.total_karma ?? ((u.link_karma || 0) + (u.comment_karma || 0)),
         age_days: Math.floor((Date.now() / 1000 - u.created_utc) / 86400),
         verified_email: u.has_verified_email,
       } : null,
@@ -244,9 +245,94 @@
     if (outside.length) add('Link not on the allowed list', `Only these sites may be linked here: ${allowed.join(', ')}`, 'Remove the link.');
     if (d.url && ctx.settings.submission_type === 'self') add('Text posts only', 'This subreddit accepts text posts only, not link posts.', 'Post it as a text post.');
 
+    for (const f of accountGate(ctx).fails) add('Account requirement', f, 'Build karma by commenting first, or post in a subreddit without this limit.');
     const notes = [];
     if (req.is_flair_required) notes.push('this subreddit requires a post flair, so pick one before posting');
     return { findings: out, notes };
+  }
+
+  // Below these, unpublished AutoModerator gates commonly remove posts. They are rules of thumb,
+  // not any subreddit's real threshold, which moderators keep private.
+  const LOW_KARMA = 100;
+  const NEW_ACCOUNT_DAYS = 30;
+
+  // Karma and account-age gates are the commonest reason a rule-abiding post is removed, and they
+  // don't depend on the draft, so they are worked out as soon as the subreddit is known.
+  function accountGate(ctx) {
+    const acct = ctx.account;
+    const text = [
+      ...ctx.rules.map((r) => `${r.name}. ${r.description || ''}`),
+      ctx.submitText, ctx.requirements?.guidelines_text, ctx.wiki, ctx.sidebar,
+    ].filter(Boolean).join('\n');
+    const sentences = text.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
+    const mentions = [...new Set(sentences.filter((s) => /\bkarma\b|account age|days? old|weeks? old|months? old|new accounts?/i.test(s)))]
+      .slice(0, 3).map((s) => (s.length > 220 ? `${s.slice(0, 220)}…` : s));
+    const fails = [];
+    if (acct) {
+      for (const s of mentions) {
+        const k = s.match(/(\d[\d,]*)\s*\+?\s*(?:[a-z]+\s+){0,2}karma|karma\s+(?:[a-z]+\s+){0,4}?(\d[\d,]*)/i);
+        if (k) {
+          const need = Number((k[1] || k[2]).replace(/,/g, ''));
+          const [kind, have] = /comment karma/i.test(s) ? ['comment karma', acct.comment_karma]
+            : /(post|link) karma/i.test(s) ? ['post karma', acct.link_karma] : ['karma', acct.total_karma];
+          if (need > 0 && have < need) fails.push(`You have ${have} ${kind}; this subreddit asks for ${need}.`);
+        }
+        const d = s.match(/(\d+)\s*(day|week|month|year)s?(?:\s+old|\s+of age)?/i);
+        if (d && /account|old/i.test(s)) {
+          const need = Number(d[1]) * { day: 1, week: 7, month: 30, year: 365 }[d[2].toLowerCase()];
+          if (acct.age_days < need) fails.push(`Your account is ${acct.age_days} days old; this subreddit asks for ${need} days.`);
+        }
+      }
+    }
+    const low = acct && !fails.length && (acct.total_karma < LOW_KARMA || acct.age_days < NEW_ACCOUNT_DAYS);
+    return { acct, mentions, fails, low };
+  }
+
+  let preSub = '';
+  async function preflight() {
+    const sub = ui.subInput.value.trim().replace(/^\/?r\//, '');
+    if (!sub || sub === preSub) return;
+    preSub = sub;
+    ui.pre.replaceChildren(el('div', 'wae-rc-note', `Reading r/${sub}…`));
+    try {
+      const ctx = await fetchContext(sub);
+      const { removedIn = {} } = await chrome.storage.local.get({ removedIn: {} });
+      if (preSub === sub) renderPreflight(sub, ctx, removedIn[sub.toLowerCase()]);
+    } catch (e) {
+      if (preSub === sub) ui.pre.replaceChildren(el('div', 'wae-rc-note', `Couldn't read r/${sub}. Check the name.`));
+    }
+  }
+
+  function renderPreflight(sub, ctx, removed) {
+    const box = ui.pre;
+    box.replaceChildren();
+    const g = accountGate(ctx);
+    const warn = (cls, msg) => box.append(el('div', `wae-rc-verdict wae-rc-${cls}`, msg));
+    for (const b of ctx.blockers) warn('likely_removed', b);
+    for (const f of g.fails) warn('likely_removed', f);
+    if (removed) {
+      warn('likely_removed', `A post of yours was removed here on ${removed.on} when you had ${removed.karma} karma.`
+        + (g.acct ? ` You have ${g.acct.total_karma} now.` : ''));
+    } else if (g.low) {
+      warn('risky', `Your account has ${g.acct.total_karma} karma and is ${g.acct.age_days} days old. Many subreddits automatically remove posts from low-karma or new accounts, and they keep the limit private.`);
+    }
+    if (g.acct) {
+      box.append(el('div', 'wae-rc-note', `Your account: ${g.acct.total_karma} karma (${g.acct.link_karma} post, ${g.acct.comment_karma} comment), ${g.acct.age_days} days old.`));
+    } else {
+      box.append(el('div', 'wae-rc-note', "Couldn't read your karma. Are you logged in to Reddit?"));
+    }
+    for (const m of g.mentions) box.append(el('div', 'wae-rc-quote', `r/${sub} says: “${m}”`));
+    if (!g.mentions.length) {
+      box.append(el('div', 'wae-rc-note', `r/${sub} publishes no karma or account-age limit. It may still enforce a hidden one; no tool can read those.`));
+    }
+    if (g.acct && !removed) {
+      box.append(button('wae-rc-link2', 'My post was removed here', async () => {
+        const { removedIn = {} } = await chrome.storage.local.get({ removedIn: {} });
+        removedIn[sub.toLowerCase()] = { on: new Date().toISOString().slice(0, 10), karma: g.acct.total_karma };
+        await chrome.storage.local.set({ removedIn });
+        renderPreflight(sub, ctx, removedIn[sub.toLowerCase()]);
+      }));
+    }
   }
 
   function sourcesLine(ctx) {
@@ -286,20 +372,22 @@
     const subInput = el('input', 'wae-rc-sub');
     subInput.placeholder = 'subreddit (without r/)';
     subInput.addEventListener('input', schedule);
+    subInput.addEventListener('change', preflight);
     const fixBtn = button('wae-rc-btn', 'Fix my post', () => run(true, true));
     fixBtn.title = 'Checks the draft and rewrites it to follow the rules. You can undo it.';
     const btn = button('wae-rc-btn2', 'Just check', () => run(true));
+    const pre = el('div', 'wae-rc-pre');
     const out = el('div', 'wae-rc-out');
     const foot = el('div', 'wae-rc-foot',
       'Your draft is sent to your chosen AI provider for each check. AutoModerator, karma gates and mod discretion are invisible to this tool.');
-    bodyBox.append(subInput, fixBtn, btn, out, foot);
+    bodyBox.append(subInput, pre, fixBtn, btn, out, foot);
     root.append(head, bodyBox);
 
     function setOpen(open) {
       bodyBox.hidden = !open;
       toggle.textContent = open ? '–' : '+';
     }
-    ui = { subInput, btn, fixBtn, out, setOpen, isOpen: () => !bodyBox.hidden };
+    ui = { subInput, pre, btn, fixBtn, out, setOpen, isOpen: () => !bodyBox.hidden };
     return root;
   }
 
@@ -401,7 +489,6 @@
     const note = el('div', 'wae-rc-note');
     const say = (msg) => { note.textContent = msg; };
 
-    for (const b of ctx.blockers) out.append(el('div', 'wae-rc-verdict wae-rc-likely_removed', b));
     out.append(el('div', `wae-rc-verdict wae-rc-${result.verdict}`, LABELS[result.verdict]));
     if (!ctx.rules.length) out.append(el('p', 'wae-rc-note', 'This subreddit publishes no structured rules; only the other sources were checked.'));
 
@@ -498,11 +585,13 @@
       }
       const sub = subFromPath();
       if (sub && !ui.subInput.value) ui.subInput.value = sub;
+      if (document.activeElement !== ui.subInput) preflight();
       placeBadge();
     } else if (panel) {
       panel.remove();
       badge.remove();
       panel = badge = ui = null;
+      preSub = '';
       clearTimeout(timer);
       lastKey = '';
     }
