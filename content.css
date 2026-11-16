@@ -22,3 +22,21 @@
 .wae-rc-fix{color:#7fd48c}
 .wae-rc-err{color:#ff9a90}
 }
+.wae-rc-body[hidden],.wae-rc-badge[hidden],.wae-rc [hidden]{display:none}
+.wae-rc-auto{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer}
+.wae-rc-bar{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.wae-rc-btn2{padding:5px 10px;border:1px solid #0b5cad;border-radius:6px;background:transparent;color:#0b5cad;font:inherit;font-weight:600;cursor:pointer;margin-top:4px}
+.wae-rc-btn2:disabled{opacity:.5;cursor:default}
+.wae-rc-change{margin-top:4px;font-size:12px;overflow-wrap:anywhere}
+.wae-rc-change del{background:#fde3e1;color:#8c1c13}
+.wae-rc-change ins{background:#e3f4e6;color:#14591f;text-decoration:none}
+.wae-rc-badge{position:fixed;z-index:2147483001;width:26px;height:26px;border-radius:50%;border:2px solid #fff;background:#8a8f98;color:#fff;font:700 12px/1 system-ui,sans-serif;cursor:pointer;padding:0;box-shadow:0 1px 5px rgba(0,0,0,.3)}
+.wae-rc-badge[data-state=no_published_rule_broken]{background:#1a7f37}
+.wae-rc-badge[data-state=risky]{background:#b26a00}
+.wae-rc-badge[data-state=likely_removed],.wae-rc-badge[data-state=error]{background:#c62828}
+.wae-rc-badge[data-state=busy]{background:#0b5cad}
+@media (prefers-color-scheme:dark){
+.wae-rc-btn2{border-color:#6cb0f2;color:#6cb0f2}
+.wae-rc-change del{background:#5c1f1a;color:#ffc9c2}
+.wae-rc-change ins{background:#1d4a26;color:#b9f0c2}
+}
