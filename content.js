@@ -288,6 +288,65 @@
     return { acct, mentions, fails, low };
   }
 
+  // A hidden karma limit can't be read, but it can be bounded: removed posts vanish from the
+  // subreddit and surviving ones stay, so nobody who posted successfully was under the limit.
+  // The lowest-karma recent poster is therefore a ceiling on where the limit can be.
+  const SAMPLE_AUTHORS = 40;
+  async function estimateGate(sub) {
+    const key = sub.toLowerCase();
+    const { gateEstimates = {} } = await chrome.storage.local.get({ gateEstimates: {} });
+    if (gateEstimates[key] && Date.now() - gateEstimates[key].at < 86400000) return gateEstimates[key];
+
+    const get = async (path) => {
+      const r = await fetch(`${location.origin}${path}`, { credentials: 'include' });
+      if (!r.ok) throw new Error(`Reddit returned ${r.status}`);
+      return r.json();
+    };
+    const listing = await get(`/r/${sub}/new.json?limit=100`);
+    // Moderators and pinned posts are exempt from the limit, so they say nothing about it.
+    const posts = (listing?.data?.children || []).map((ch) => ch.data).filter((p) => p && !p.stickied
+      && p.author && p.author !== '[deleted]' && p.author !== 'AutoModerator'
+      && p.distinguished !== 'moderator' && !p.removed_by_category);
+    const firstPost = new Map();
+    for (const p of posts) if (!firstPost.has(p.author)) firstPost.set(p.author, p);
+    const authors = [...firstPost.keys()].slice(0, SAMPLE_AUTHORS);
+
+    const people = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < authors.length) {
+        const name = authors[next++];
+        const u = (await get(`/user/${encodeURIComponent(name)}/about.json`).catch(() => null))?.data;
+        if (!u || u.is_suspended || u.created_utc == null) continue;
+        people.push({
+          total: u.total_karma ?? ((u.link_karma || 0) + (u.comment_karma || 0)),
+          comment: u.comment_karma || 0,
+          // Age on the day they posted, which is what a limit would have tested.
+          ageDays: Math.max(0, Math.floor((firstPost.get(name).created_utc - u.created_utc) / 86400)),
+        });
+      }
+    };
+    await Promise.all(Array.from({ length: 4 }, worker)); // a few at a time, to stay polite to Reddit
+    if (people.length < 5) throw new Error('Too few recent posts to estimate from.');
+
+    const min = (k) => Math.min(...people.map((x) => x[k]));
+    const est = { at: Date.now(), n: people.length, total: min('total'), comment: min('comment'), ageDays: min('ageDays') };
+    gateEstimates[key] = est;
+    await chrome.storage.local.set({ gateEstimates });
+    return est;
+  }
+
+  function showEstimate(box, est, acct) {
+    box.replaceChildren();
+    const under = acct && (acct.total_karma < est.total || acct.age_days < est.ageDays);
+    box.append(el('div', `wae-rc-verdict wae-rc-${under ? 'risky' : 'no_published_rule_broken'}`,
+      under ? 'You are below every recent poster who got through.' : 'Accounts like yours have posted here recently.'));
+    box.append(el('div', 'wae-rc-note',
+      `Of the last ${est.n} people whose posts stayed up, the lowest had ${est.total} karma (${est.comment} comment karma) and the newest account was ${est.ageDays} days old when it posted.`));
+    box.append(el('div', 'wae-rc-note',
+      `So any hidden limit is at most about ${est.total} karma and ${est.ageDays} days. It may be lower: this is a ceiling from a sample, not the real number, and karma shown is today's, not on the day they posted.`));
+  }
+
   let preSub = '';
   async function preflight() {
     const sub = ui.subInput.value.trim().replace(/^\/?r\//, '');
@@ -325,6 +384,21 @@
     if (!g.mentions.length) {
       box.append(el('div', 'wae-rc-note', `r/${sub} publishes no karma or account-age limit. It may still enforce a hidden one; no tool can read those.`));
     }
+    const estBox = el('div', 'wae-rc-pre');
+    const estBtn = button('wae-rc-btn2', 'Estimate the hidden karma limit', async () => {
+      estBtn.disabled = true;
+      estBtn.textContent = 'Looking at recent posters…';
+      try {
+        showEstimate(estBox, await estimateGate(sub), g.acct);
+        estBtn.remove();
+      } catch (e) {
+        estBox.replaceChildren(el('div', 'wae-rc-note', `Couldn't estimate: ${e.message || e}`));
+        estBtn.disabled = false;
+        estBtn.textContent = 'Estimate the hidden karma limit';
+      }
+    });
+    estBtn.title = 'Checks the karma of people whose recent posts stayed up. Uses Reddit only, no AI credits.';
+    box.append(estBtn, estBox);
     if (g.acct && !removed) {
       box.append(button('wae-rc-link2', 'My post was removed here', async () => {
         const { removedIn = {} } = await chrome.storage.local.get({ removedIn: {} });
