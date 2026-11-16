@@ -44,22 +44,45 @@
     return r.width > 20 && r.height > 8 && (e.checkVisibility?.({ visibilityProperty: true }) ?? true);
   };
 
+  // Serialised copies of the post and captcha tokens are not prose.
+  const looksLikeData = (s) => {
+    const t = s.trim();
+    if (/^[{[]/.test(t)) { try { JSON.parse(t); return true; } catch { /* prose that starts with a bracket */ } }
+    return t.length > 80 && !/\s/.test(t);
+  };
+
   // The body is the editor the author can see. Hidden fields are never read: Reddit's page carries
   // hidden textareas (captcha tokens, serialised copies of the post) whose contents are not prose,
   // and sending one of those as "the body" makes the check judge machine text.
-  function fields() {
+  function findFields() {
     const els = editables();
     const title = els.find((e) => nameOf(e) === 'title') || null;
-    const url = els.find((e) => ['link', 'url'].includes(nameOf(e))) || null;
-    const rest = els.filter((e) => e !== title && e !== url && isVisible(e)
-      && !/captcha|token|flair|search/i.test(nameOf(e))
-      && !els.some((o) => o !== e && o !== title && o.contains(e)));
+    const url = els.find((e) => ['link', 'url'].includes(nameOf(e)) || e.type === 'url') || null;
+    const usable = (e) => e !== title && e !== url && isVisible(e) && !looksLikeData(textOf(e))
+      && !/captcha|token|flair|search/i.test(nameOf(e));
     const area = (e) => { const r = e.getBoundingClientRect(); return r.width * r.height; };
-    const filled = rest.filter((e) => textOf(e).trim());
-    const pool = filled.length ? filled : rest;
-    // With several visible candidates, the largest box is the post editor.
-    const body = pool.sort((x, y) => area(y) - area(x))[0] || null;
+    const best = (list) => {
+      const filled = list.filter((e) => textOf(e).trim());
+      return (filled.length ? filled : list).sort((x, y) => area(y) - area(x))[0] || null;
+    };
+    // New Reddit's post editor lives in <shreddit-composer>: a rich-text box in rich mode,
+    // a textarea in markdown mode. Anything outside it is only a fallback (old Reddit, redesigns).
+    const composer = deepAll('shreddit-composer[name="body"]')[0] || deepAll('shreddit-composer')[0];
+    const inComposer = composer ? els.filter((e) => {
+      for (let n = e; n; n = n.parentNode || n.host) if (n === composer) return true;
+      return false;
+    }).filter(usable) : [];
+    const outermost = (list) => list.filter((e) => !list.some((o) => o !== e && o.contains(e)));
+    const body = best(outermost(inComposer)) || best(outermost(els.filter(usable)));
     return { title, body, url };
+  }
+  let memo = { at: 0, val: null };
+  function fields() {
+    const v = memo.val;
+    if (!v || Date.now() - memo.at > 1000 || [v.title, v.body, v.url].some((e) => e && !e.isConnected)) {
+      memo = { at: Date.now(), val: findFields() };
+    }
+    return memo.val;
   }
   const isPlain = (el) => el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
   const textOf = (el) => (el ? (isPlain(el) ? el.value : el.innerText) || '' : '');
@@ -131,14 +154,13 @@
       return r.json();
     };
     const opt = (path) => get(path).catch(() => null);
-    const [rulesJson, about, wikiIndex, wikiRules, hot, flairs, reqs, me] = await Promise.all([
+    const [rulesJson, about, wikiIndex, wikiRules, flairs, reqs, me] = await Promise.all([
       get(`/r/${sub}/about/rules.json`),
       opt(`/r/${sub}/about.json`),
       opt(`/r/${sub}/wiki/index.json`),
       opt(`/r/${sub}/wiki/rules.json`),
-      opt(`/r/${sub}/hot.json?limit=5`),
       opt(`/r/${sub}/api/link_flair_v2.json`),
-      opt(`/api/v1/${sub}/post_requirements.json`),
+      opt(`/api/v1/${sub}/post_requirements`),
       opt('/api/me.json'),
     ]);
     const a = about?.data || {};
@@ -147,14 +169,15 @@
       // Rules marked comment-only don't apply to a post.
       rules: (rulesJson.rules || []).filter((r) => r.kind !== 'comment')
         .map((r) => ({ name: r.short_name, description: r.description })),
-      sidebar: [a.submit_text, a.description].filter(Boolean).join('\n\n'),
+      submitText: a.submit_text || '',
+      sidebar: a.description || '',
       wiki: [wikiRules?.data?.content_md, wikiIndex?.data?.content_md].filter(Boolean).join('\n\n').slice(0, 8000),
-      pinned: (hot?.data?.children || []).map((c) => c.data).filter((p) => p?.stickied)
-        .map((p) => ({ title: p.title, text: (p.selftext || '').slice(0, 3000) })),
       flairs: Array.isArray(flairs) ? flairs.map((f) => f.text).filter(Boolean).slice(0, 40) : [],
-      requirements: reqs && typeof reqs === 'object' && !reqs.error ? reqs : null,
+      // This endpoint can answer 200 with an error body when the session isn't accepted.
+      requirements: reqs && typeof reqs === 'object' && !reqs.error && !reqs.json?.errors
+        && 'title_text_max_length' in reqs ? reqs : null,
       settings: {
-        submission_type: a.submission_type, subreddit_type: a.subreddit_type,
+        submission_type: a.submission_type, subreddit_type: a.subreddit_type, allow_polls: a.allow_polls,
         restrict_posting: a.restrict_posting, allow_images: a.allow_images,
         allow_videos: a.allow_videos, over18: a.over18,
       },
@@ -166,6 +189,7 @@
       // Facts that need no AI at all.
       blockers: [
         a.user_is_banned && 'You are banned from this subreddit.',
+        u.is_suspended && 'Your Reddit account is suspended.',
         a.subreddit_type === 'private' && !a.user_is_contributor && 'This subreddit is private and you are not an approved member.',
         a.subreddit_type === 'restricted' && a.user_is_contributor === false && a.user_is_moderator === false
           && 'Only approved users can post in this subreddit.',
@@ -175,14 +199,64 @@
     return out;
   }
 
+  // Limits the moderators configured are enforced by Reddit itself at submit, so they are
+  // checked here in code. They are facts about the draft, not judgements, and need no AI.
+  function limitFindings(ctx, d) {
+    const req = ctx.requirements || {};
+    const out = [];
+    const add = (rule, why, fix) => out.push({
+      rule, why, fix, source: 'requirements', rule_quote: '', field: 'none', quote: '', replacement: '',
+    });
+    const list = (v) => (Array.isArray(v) ? v.filter(Boolean) : []);
+    const has = (text, s) => text.toLowerCase().includes(String(s).toLowerCase());
+    // Moderators write these patterns for Reddit's server; ones this browser can't run are skipped.
+    const matchesAny = (patterns, text) => {
+      let ran = 0;
+      for (const p of patterns) {
+        try { ran++; if (new RegExp(p).test(text)) return true; } catch { ran--; }
+      }
+      return ran === 0;
+    };
+    const checkText = (label, text, k) => {
+      const min = req[`${k}_text_min_length`], max = req[`${k}_text_max_length`];
+      if (min && text.length < min) add(`${label} too short`, `The ${k} is ${text.length} characters; this subreddit requires at least ${min}.`, `Lengthen the ${k}.`);
+      if (max && text.length > max) add(`${label} too long`, `The ${k} is ${text.length} characters; this subreddit allows at most ${max}.`, `Shorten the ${k}.`);
+      const need = list(req[`${k}_required_strings`]);
+      if (need.length && !need.some((s) => has(text, s))) add(`${label} is missing required text`, `The ${k} must contain one of: ${need.join(', ')}`, `Add one of them to the ${k}.`);
+      const banned = list(req[`${k}_blacklisted_strings`]).filter((s) => has(text, s));
+      if (banned.length) add(`${label} contains banned text`, `Not allowed in the ${k} here: ${banned.join(', ')}`, 'Remove it.');
+      const patterns = list(req[`${k}_regexes`]);
+      if (patterns.length && !matchesAny(patterns, text)) add(`${label} format`, `The ${k} doesn't match the format this subreddit requires.`, "Check the subreddit's posting guidelines for the required format.");
+    };
+    if (d.title) checkText('Title', d.title, 'title');
+    if (req.body_restriction_policy === 'required' && !d.body) add('Body required', 'This subreddit requires text in the post body.', 'Write a body.');
+    if (req.body_restriction_policy === 'notAllowed' && d.body) add('Body not allowed', "This subreddit doesn't allow text in the post body.", 'Remove the body text.');
+    if (d.body && req.body_restriction_policy !== 'notAllowed') checkText('Body', d.body, 'body');
+
+    const hosts = [d.url, ...(d.body.match(/https?:\/\/[^\s)\]]+/g) || [])].filter(Boolean).map((u) => {
+      try { return new URL(/^https?:/.test(u) ? u : `https://${u}`).hostname.replace(/^www\./, ''); } catch { return ''; }
+    }).filter(Boolean);
+    const under = (host, domain) => host === domain || host.endsWith(`.${domain}`);
+    const blocked = hosts.filter((h) => list(req.domain_blacklist).some((dom) => under(h, dom)));
+    if (blocked.length) add('Banned link', `This subreddit doesn't allow links to: ${[...new Set(blocked)].join(', ')}`, 'Remove the link.');
+    const allowed = list(req.domain_whitelist);
+    const outside = allowed.length ? hosts.filter((h) => !allowed.some((dom) => under(h, dom))) : [];
+    if (outside.length) add('Link not on the allowed list', `Only these sites may be linked here: ${allowed.join(', ')}`, 'Remove the link.');
+    if (d.url && ctx.settings.submission_type === 'self') add('Text posts only', 'This subreddit accepts text posts only, not link posts.', 'Post it as a text post.');
+
+    const notes = [];
+    if (req.is_flair_required) notes.push('this subreddit requires a post flair, so pick one before posting');
+    return { findings: out, notes };
+  }
+
   function sourcesLine(ctx) {
     return 'Checked: ' + [
       `${ctx.rules.length} rules`,
+      ctx.submitText && 'posting guidance',
       ctx.sidebar && 'sidebar',
       ctx.wiki && 'wiki',
-      ctx.pinned.length && `${ctx.pinned.length} pinned post(s)`,
       ctx.flairs.length && 'flair list',
-      ctx.requirements && 'post requirements',
+      ctx.requirements && "the moderators' posting limits",
       ctx.account && 'your karma and account age',
     ].filter(Boolean).join(', ');
   }
@@ -287,7 +361,14 @@
       const ctx = await fetchContext(sub);
       const res = await chrome.runtime.sendMessage({ type: 'rulecheck', payload: { sub, ...draft, ctx } });
       if (!res?.ok) throw new Error(res?.error || 'No response from the extension.');
-      const fix = render(res.result, ctx, draft);
+      const limits = limitFindings(ctx, draft);
+      const result = {
+        ...res.result,
+        violations: [...limits.findings, ...res.result.violations],
+        verdict: limits.findings.length ? 'likely_removed' : res.result.verdict,
+        cannot_verify: [...limits.notes, ...res.result.cannot_verify],
+      };
+      const fix = render(result, ctx, draft);
       if (autofix) await fix();
     } catch (e) {
       showError(String(e.message || e));
